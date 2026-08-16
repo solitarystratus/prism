@@ -1,0 +1,17 @@
+{
+  "name": "Prismfall",
+  "short_name": "Prismfall",
+  "description": "A physics journey through rainfall, clouds and rainbows.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#10182f",
+  "theme_color": "#10182f",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
