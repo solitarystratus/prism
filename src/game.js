@@ -1,0 +1,1636 @@
+import { loadSave, persistSave, exportSaveText, importSaveText, clearSave } from './core/storage.js';
+import { SHOP_ITEMS } from './progression/shop.js';
+import { makePrimary } from './progression/objectives.js';
+import { generateEndlessLevel } from './levels/generator.js';
+import { updatePlatformMotion } from './gameplay/platforms.js';
+import { buildCheckpoints } from './gameplay/checkpoints.js';
+import { obstaclePosition, lightningState } from './gameplay/obstacles.js';
+import { AudioEngine } from './core/audio.js';
+
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  const ui = {
+    menu: document.getElementById('menu'),
+    pause: document.getElementById('pauseOverlay'),
+    settings: document.getElementById('settingsOverlay'),
+    level: document.getElementById('levelOverlay'),
+    finish: document.getElementById('finishOverlay'),
+    hud: document.getElementById('hud'),
+    boost: document.getElementById('boostMeter'),
+    boostFill: document.getElementById('boostFill'),
+    touch: document.getElementById('touchControls'),
+    toast: document.getElementById('toast'),
+    levelText: document.getElementById('levelText'),
+    prismText: document.getElementById('prismText'),
+    prismGoal: document.getElementById('prismGoal'),
+    muteBtn: document.getElementById('muteBtn'),
+    pauseBtn: document.getElementById('pauseBtn'),
+    continueBtn: document.getElementById('continueBtn'),
+    settingsBtn: document.getElementById('settingsBtn'),
+    pauseSettingsBtn: document.getElementById('pauseSettingsBtn'),
+    settingsCloseBtn: document.getElementById('settingsCloseBtn'),
+    settingsMuteBtn: document.getElementById('settingsMuteBtn'),
+    motionBtn: document.getElementById('motionBtn'),
+    exportSaveBtn: document.getElementById('exportSaveBtn'),
+    importSaveBtn: document.getElementById('importSaveBtn'),
+    saveImportInput: document.getElementById('saveImportInput'),
+    resetSaveBtn: document.getElementById('resetSaveBtn'),
+    saveStatus: document.getElementById('saveStatus'),
+    levelEyebrow: document.getElementById('levelEyebrow'),
+    levelTitle: document.getElementById('levelTitle'),
+    rewardPrism: document.getElementById('rewardPrism'),
+    rewardTime: document.getElementById('rewardTime'),
+    rewardName: document.getElementById('rewardName'),
+    nextBtn: document.getElementById('nextBtn'),
+    finalScore: document.getElementById('finalScore')
+  };
+
+  ui.prismLabel = ui.prismText?.closest('.stat')?.querySelector('.label') || null;
+  ui.rewardPrismLabel = ui.rewardPrism?.parentElement?.querySelector('span') || null;
+  const hudLeft = ui.hud?.querySelector('.hud-left');
+  if (hudLeft) {
+    const wallet = document.createElement('div');
+    wallet.className = 'glass stat wide';
+    wallet.innerHTML = '<span class="label">DROPS</span><strong id="dropsText">0</strong>';
+    hudLeft.appendChild(wallet);
+    ui.dropsText = wallet.querySelector('#dropsText');
+    const shield = document.createElement('div');
+    shield.className = 'glass stat';
+    shield.innerHTML = '<span class="label">GUARD</span><strong id="shieldText">0</strong>';
+    hudLeft.appendChild(shield);
+    ui.shieldText = shield.querySelector('#shieldText');
+    const combo = document.createElement('div');
+    combo.className = 'glass stat';
+    combo.innerHTML = '<span class="label">CHAIN</span><strong id="comboText">—</strong>';
+    hudLeft.appendChild(combo);
+    ui.comboText = combo.querySelector('#comboText');
+    const ringStat = document.createElement('div');
+    ringStat.className = 'glass stat';
+    ringStat.innerHTML = '<span class="label">RINGS</span><strong id="ringText">—</strong>';
+    hudLeft.appendChild(ringStat);
+    ui.ringText = ringStat.querySelector('#ringText');
+  }
+
+  const TAU = Math.PI * 2;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const smoothstep = t => t * t * (3 - 2 * t);
+
+  let DPR = 1;
+  let W = 0, H = 0;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = `${W}px`;
+    canvas.style.height = `${H}px`;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  let save = loadSave();
+  const persist = () => persistSave(save);
+
+  // Shop UI is created from game.js so this remains a one-file source update.
+  const shopStyle = document.createElement('style');
+  shopStyle.textContent = `
+    #shopOverlay .menu-card{width:min(760px,calc(100vw - 28px));max-height:min(82vh,760px);overflow:auto}
+    .shop-top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:2px 0 18px}
+    .shop-balance{font-size:12px;letter-spacing:.12em;opacity:.78}.shop-balance strong{display:block;font-size:24px;letter-spacing:.02em;margin-top:3px}
+    .shop-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;text-align:left;margin:14px 0 18px}
+    .shop-item{border:1px solid rgba(220,246,255,.14);background:rgba(16,32,56,.34);border-radius:16px;padding:14px;display:grid;grid-template-columns:1fr auto;gap:8px 12px;align-items:center}
+    .shop-item h3{font-size:14px;margin:0;letter-spacing:.04em}.shop-item p{grid-column:1/-1;margin:0;font-size:11px;line-height:1.45;opacity:.65}
+    .shop-item button{grid-row:1;grid-column:2;border:1px solid rgba(218,247,255,.22);border-radius:999px;background:rgba(220,248,255,.09);color:inherit;padding:8px 11px;font:700 10px/1 inherit;letter-spacing:.06em;cursor:pointer}
+    .shop-item button:disabled{opacity:.4;cursor:default}.shop-item.equipped{box-shadow:inset 0 0 0 1px rgba(157,234,255,.28),0 0 24px rgba(105,210,255,.08)}
+    .shop-section{font-size:10px;letter-spacing:.2em;opacity:.58;margin:18px 0 8px;text-align:left}
+    @media(max-width:620px){.shop-grid{grid-template-columns:1fr}}
+  `;
+  document.head.appendChild(shopStyle);
+
+  const shopOverlay = document.createElement('section');
+  shopOverlay.id = 'shopOverlay';
+  shopOverlay.className = 'overlay';
+  shopOverlay.innerHTML = `<div class="menu-card compact">
+    <div class="eyebrow">SPEND WHAT YOU EARN</div>
+    <h2>RAINBOW SHOP</h2>
+    <div class="shop-top"><p class="tiny">Drops buy permanent cosmetics. Purchases stay on this browser.</p><div class="shop-balance">RAINBOW DROPS<strong id="shopBalance">0</strong></div></div>
+    <div id="shopItems"></div>
+    <button id="shopCloseBtn" class="secondary">BACK</button>
+  </div>`;
+  document.body.appendChild(shopOverlay);
+  ui.shop = shopOverlay;
+  ui.shopBalance = shopOverlay.querySelector('#shopBalance');
+  ui.shopItems = shopOverlay.querySelector('#shopItems');
+  let shopReturnOverlay = ui.menu;
+
+  function shopButtonLabel(item) {
+    if (equippedShopItem(item)) return 'EQUIPPED';
+    if (ownsShopItem(item)) return 'EQUIP';
+    return `BUY ${item.price.toLocaleString()}`;
+  }
+
+  function renderShopSection(kind, title) {
+    const items = SHOP_ITEMS.filter(item => item.kind === kind);
+    return `<div class="shop-section">${title}</div><div class="shop-grid">${items.map(item => {
+      const owned = ownsShopItem(item);
+      const equipped = equippedShopItem(item);
+      const disabled = equipped ? ' disabled' : '';
+      return `<div class="shop-item${equipped ? ' equipped' : ''}"><h3>${item.name}</h3><button data-shop-kind="${item.kind}" data-shop-key="${item.key}"${disabled}>${shopButtonLabel(item)}</button><p>${item.desc}${owned ? ' • OWNED' : ` • ${item.price.toLocaleString()} DROPS`}</p></div>`;
+    }).join('')}</div>`;
+  }
+
+  function renderRareProgress() {
+    const goldenTier = save.rarePerks?.goldenTier || 0;
+    const auroraTier = save.rarePerks?.auroraTier || 0;
+    const goldenNext = [3,8,15].find(n => (save.rare?.golden || 0) < n);
+    const auroraNext = [2,5,10].find(n => (save.rare?.aurora || 0) < n);
+    const goldenText = goldenTier >= 3 ? 'All Golden perks unlocked' : `Next perk at ${goldenNext} Golden Prisms`;
+    const auroraText = auroraTier >= 3 ? 'All Aurora perks unlocked' : `Next perk at ${auroraNext} Aurora Prisms`;
+    return `<div class="shop-section">RARE PRISM PERKS</div><div class="shop-grid">
+      <div class="shop-item"><h3>Golden Collection • ${save.rare?.golden || 0}</h3><p>${goldenText} • T${goldenTier}/3</p></div>
+      <div class="shop-item"><h3>Aurora Collection • ${save.rare?.aurora || 0}</h3><p>${auroraText} • T${auroraTier}/3</p></div>
+    </div>`;
+  }
+
+  function updateShop() {
+    if (!ui.shopItems) return;
+    ui.shopBalance.textContent = Math.floor(save.drops).toLocaleString();
+    ui.shopItems.innerHTML = renderRareProgress() + renderShopSection('aura','AURAS') + renderShopSection('trail','TRAILS');
+    ui.shopItems.querySelectorAll('[data-shop-key]').forEach(btn => btn.addEventListener('click', () => {
+      const item = SHOP_ITEMS.find(x => x.kind === btn.dataset.shopKind && x.key === btn.dataset.shopKey);
+      if (item) buyOrEquipShopItem(item);
+    }));
+    document.querySelectorAll('[data-shop-balance]').forEach(el => el.textContent = Math.floor(save.drops).toLocaleString());
+  }
+
+  function openShop(fromOverlay) {
+    shopReturnOverlay = fromOverlay || ui.menu;
+    [ui.menu, ui.pause, ui.level, ui.finish, ui.shop, ui.settings].filter(Boolean).forEach(el => el.classList.remove('visible'));
+    updateShop();
+    ui.shop.classList.add('visible');
+  }
+
+  function closeShop() {
+    ui.shop.classList.remove('visible');
+    if (shopReturnOverlay) shopReturnOverlay.classList.add('visible');
+  }
+
+  const state = {
+    scene: 'menu',
+    levelIndex: 0,
+    nextLevelIndex: 1,
+    advancing: false,
+    levelTime: 0,
+    totalTime: 0,
+    prism: 0,
+    levelDropsEarned: 0,
+    rareDropsEarned: 0,
+    combo: 0,
+    comboTimer: 0,
+    comboDropsEarned: 0,
+    bestComboLevel: 0,
+    ringDropsEarned: 0,
+    paused: false,
+    muted: !!save.settings?.muted,
+    reducedMotion: !!save.settings?.reducedMotion,
+    screenShake: 0,
+    flash: 0,
+    cameraX: 0,
+    cameraY: 0,
+    targetCameraX: 0,
+    targetCameraY: 0,
+    pointerX: W / 2,
+    pointerY: H / 2,
+    rainIntensity: .85,
+    weatherHue: 210,
+    firstInput: false,
+    lastTs: performance.now()
+  };
+
+  const audio = new AudioEngine(() => state.muted);
+  ui.muteBtn.textContent = state.muted ? '♩' : '♫';
+
+  let settingsReturnOverlay = ui.menu;
+
+  function updateSettingsUi(message = '') {
+    if (ui.settingsMuteBtn) ui.settingsMuteBtn.textContent = `SOUND: ${state.muted ? 'OFF' : 'ON'}`;
+    if (ui.motionBtn) ui.motionBtn.textContent = `REDUCED MOTION: ${state.reducedMotion ? 'ON' : 'OFF'}`;
+    if (ui.saveStatus) ui.saveStatus.textContent = message || 'Export a backup before clearing browser data or changing devices.';
+  }
+
+  function openSettings(fromOverlay) {
+    settingsReturnOverlay = fromOverlay || ui.menu;
+    [ui.menu, ui.pause, ui.level, ui.finish, ui.shop, ui.settings].filter(Boolean).forEach(el => el.classList.remove('visible'));
+    updateSettingsUi();
+    ui.settings?.classList.add('visible');
+  }
+
+  function closeSettings() {
+    ui.settings?.classList.remove('visible');
+    if (settingsReturnOverlay) settingsReturnOverlay.classList.add('visible');
+  }
+
+  function setMuted(value, announce = true) {
+    state.muted = Boolean(value);
+    save.settings = { ...(save.settings || {}), muted: state.muted, reducedMotion: state.reducedMotion };
+    persist();
+    ui.muteBtn.textContent = state.muted ? '♩' : '♫';
+    updateSettingsUi();
+    if (announce) toast(state.muted ? 'SOUND OFF' : 'SOUND ON');
+  }
+
+  function setReducedMotion(value) {
+    state.reducedMotion = Boolean(value);
+    save.settings = { ...(save.settings || {}), muted: state.muted, reducedMotion: state.reducedMotion };
+    persist();
+    updateSettingsUi(state.reducedMotion ? 'Reduced motion lowers camera shake, parallax and particle bursts.' : 'Full atmospheric motion restored.');
+  }
+
+  function downloadSaveBackup() {
+    const blob = new Blob([exportSaveText(save)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `prismfall-save-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    updateSettingsUi('Save backup exported. Keep that JSON file somewhere safe.');
+  }
+
+  async function importSaveBackup(file) {
+    if (!file) return;
+    try {
+      const imported = importSaveText(await file.text());
+      save = imported;
+      updateSettingsUi('Save imported successfully. Reloading Prismfall…');
+      setTimeout(() => location.reload(), 500);
+    } catch (error) {
+      updateSettingsUi(error?.message || 'That save could not be imported.');
+    } finally {
+      if (ui.saveImportInput) ui.saveImportInput.value = '';
+    }
+  }
+
+  function resetLocalProgress() {
+    const confirmed = window.confirm('Reset all Prismfall progress on this browser? Export a save first if you may want it later.');
+    if (!confirmed) return;
+    clearSave();
+    location.reload();
+  }
+
+  const keys = new Set();
+  const pressed = new Set();
+  window.addEventListener('keydown', e => {
+    // On the level-complete screen, Enter/Space must always mean NEXT SKY.
+    // This prevents the browser from re-activating a previously focused hidden
+    // menu button (which could restart Level 1 while keeping saved Drops).
+    if (state.scene === 'levelComplete' && !ui.shop?.classList.contains('visible') && (e.code === 'Enter' || e.code === 'Space')) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.repeat) advanceToNextLevel();
+      return;
+    }
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) e.preventDefault();
+    if (!keys.has(e.code)) pressed.add(e.code);
+    keys.add(e.code);
+    state.firstInput = true;
+    audio.init();
+    if (e.code === 'Escape' && state.scene === 'playing') togglePause();
+  });
+  window.addEventListener('keyup', e => keys.delete(e.code));
+  window.addEventListener('pointermove', e => { state.pointerX = e.clientX; state.pointerY = e.clientY; }, { passive: true });
+
+  const touch = { left:false, right:false, jump:false, burst:false };
+  document.querySelectorAll('[data-touch]').forEach(btn => {
+    const k = btn.dataset.touch;
+    const on = e => { e.preventDefault(); touch[k] = true; pressed.add(`Touch${k}`); btn.classList.add('active'); state.firstInput = true; audio.init(); };
+    const off = e => { e.preventDefault(); touch[k] = false; btn.classList.remove('active'); };
+    btn.addEventListener('pointerdown', on);
+    btn.addEventListener('pointerup', off);
+    btn.addEventListener('pointercancel', off);
+    btn.addEventListener('pointerleave', off);
+  });
+
+  function releaseAllInputs() {
+    keys.clear();
+    pressed.clear();
+    Object.keys(touch).forEach(key => { touch[key] = false; });
+    document.querySelectorAll('[data-touch].active').forEach(btn => btn.classList.remove('active'));
+  }
+
+  function pauseForInterruption() {
+    releaseAllInputs();
+    if (state.scene === 'playing' && !state.paused) togglePause(true);
+  }
+
+  document.addEventListener('visibilitychange', () => { if (document.hidden) pauseForInterruption(); });
+  window.addEventListener('blur', pauseForInterruption);
+
+  function inputDown(name) {
+    if (name === 'left') return keys.has('ArrowLeft') || keys.has('KeyA') || touch.left;
+    if (name === 'right') return keys.has('ArrowRight') || keys.has('KeyD') || touch.right;
+    if (name === 'jump') return keys.has('Space') || keys.has('ArrowUp') || keys.has('KeyW') || touch.jump;
+    if (name === 'burst') return keys.has('ShiftLeft') || keys.has('ShiftRight') || keys.has('KeyX') || touch.burst;
+    return false;
+  }
+  function inputPressed(name) {
+    if (name === 'jump') return pressed.has('Space') || pressed.has('ArrowUp') || pressed.has('KeyW') || pressed.has('Touchjump');
+    if (name === 'burst') return pressed.has('ShiftLeft') || pressed.has('ShiftRight') || pressed.has('KeyX') || pressed.has('Touchburst');
+    return false;
+  }
+
+  const LEVELS = [
+    {
+      name: 'Silver Drizzle', hue: 210, goal: 8, reward: 'Mist Trail', width: 3300, start: [180, 420], portal: [3100, 250],
+      platforms: [
+        [60,520,500,44,'cloud'], [560,487,90,28,'cloud'], [650,455,320,42,'cloud'], [970,500,110,28,'cloud'],
+        [1080,545,350,44,'cloud'], [1430,482,70,28,'cloud'], [1500,420,300,42,'spring'], [1800,470,100,28,'cloud'],
+        [1900,520,360,44,'cloud'], [2260,455,120,28,'cloud'], [2380,390,300,42,'spring'], [2680,445,100,28,'cloud'], [2780,500,430,44,'cloud']
+      ],
+      prisms: [[420,425],[760,370],[1160,455],[1370,455],[1590,325],[2020,430],[2500,300],[2920,410]],
+      storms: [[990,390,90],[1800,330,95],[2300,530,80]],
+      currents: [[1210,200,200,330,220],[2490,130,180,340,300]]
+    },
+    {
+      name: 'Thunder Garden', hue: 246, goal: 10, reward: 'Cyan Aura', width: 4200, start: [160, 390], portal: [3950, 220],
+      platforms: [
+        [40,510,420,44,'cloud'], [460,465,100,28,'cloud'], [560,420,260,42,'spring'], [820,475,120,28,'cloud'],
+        [940,530,260,44,'cloud'], [1200,455,100,28,'cloud'], [1300,380,250,42,'cloud'], [1550,450,100,28,'cloud'],
+        [1650,520,300,44,'spring'], [1950,455,110,28,'cloud'], [2060,390,260,42,'cloud'], [2320,472,110,28,'cloud'],
+        [2430,555,290,44,'cloud'], [2720,472,110,28,'cloud'], [2830,390,260,42,'spring'], [3090,455,110,28,'cloud'],
+        [3200,520,300,44,'cloud'], [3500,440,90,28,'cloud'], [3590,360,460,44,'cloud']
+      ],
+      prisms: [[340,425],[650,325],[1030,440],[1390,295],[1760,420],[2170,300],[2550,465],[2920,295],[3310,430],[3790,270]],
+      storms: [[820,250,105],[1210,570,90],[2000,260,105],[2730,300,90],[3450,440,110]],
+      currents: [[1040,150,170,350,-240],[2250,130,200,390,280],[3300,120,170,380,-250]]
+    },
+    {
+      name: 'Prismatic Tempest', hue: 198, goal: 12, reward: 'Aurora Crown', width: 5200, start: [150, 420], portal: [4940, 180],
+      platforms: [
+        [20,520,420,44,'cloud'], [440,485,120,28,'cloud'], [560,450,250,40,'spring'], [810,400,120,28,'cloud'],
+        [930,350,230,40,'cloud'], [1160,435,110,28,'cloud'], [1270,520,250,42,'spring'], [1520,460,130,28,'cloud'],
+        [1650,400,260,40,'cloud'], [1910,480,130,28,'cloud'], [2040,560,250,42,'cloud'], [2290,480,130,28,'cloud'],
+        [2420,400,240,40,'spring'], [2660,342,130,28,'cloud'], [2790,285,220,40,'cloud'], [3010,382,140,28,'cloud'],
+        [3150,480,260,42,'cloud'], [3410,410,110,28,'cloud'], [3520,340,240,40,'spring'], [3760,435,130,28,'cloud'],
+        [3890,530,260,42,'cloud'], [4150,445,110,28,'cloud'], [4260,360,250,40,'spring'], [4510,420,150,28,'cloud'], [4660,480,430,44,'cloud']
+      ],
+      prisms: [[340,430],[640,360],[1010,260],[1370,430],[1760,310],[2160,470],[2510,300],[2870,195],[3260,390],[3600,250],[4020,440],[4770,390]],
+      storms: [[820,550,95],[1200,240,100],[1570,520,90],[2300,260,110],[3040,410,100],[3470,570,100],[4180,260,105],[4580,530,95]],
+      currents: [[1050,100,180,400,280],[1840,100,200,430,-320],[2850,80,190,390,330],[3910,80,180,420,-310],[4570,90,160,350,260]]
+    }
+  ];
+
+  function getLevelSpec(index) {
+    return index < LEVELS.length ? LEVELS[index] : generateEndlessLevel(index, LEVELS.length);
+  }
+
+  let level = null;
+  let player = null;
+  let particles = [];
+  let rain = [];
+  let cloudsBg = [];
+  let rings = [];
+  let stars = [];
+
+  function makeAmbient() {
+    rain = Array.from({ length: Math.min(260, Math.floor(W * H / 3800)) }, () => ({ x:rand(0,W), y:rand(0,H), z:rand(.3,1), len:rand(8,28), speed:rand(440,980) }));
+    cloudsBg = Array.from({ length: 16 }, () => ({ x:rand(-100,W+100), y:rand(40,H*.72), s:rand(.45,1.7), a:rand(.035,.12), drift:rand(4,16), layer:rand(.1,.7) }));
+    stars = Array.from({ length: 55 }, () => ({ x:Math.random(), y:Math.random()*.62, a:rand(.08,.5), s:rand(.4,1.4) }));
+  }
+  makeAmbient();
+  window.addEventListener('resize', makeAmbient);
+
+  function buildLevel(index) {
+    const spec = getLevelSpec(index);
+    const primary = spec.primary || { type:'prisms', target:spec.goal, label:'Gather Prisms', short:'GATHER PRISMS', hudLabel:'PRISMS' };
+    level = {
+      ...spec,
+      primary,
+      archetype: spec.archetype || { key:'story', name:'STORY SKY' },
+      region: spec.region || { key:'story', name:'STORY SKY', displayName:'STORY SKY' },
+      special: spec.special || null,
+      platforms: spec.platforms.map(p => ({
+        x:p[0], baseX:p[0], y:p[1], w:p[2], h:p[3], type:p[4], pulse:Math.random()*TAU,
+        activated:false, ...(p[5] || {})
+      })),
+      prisms: spec.prisms.map((p,i) => ({ x:p[0], y:p[1], r:13, got:false, phase:i*.8 })),
+      rarePrisms: (spec.rarePrisms || []).map((p,i) => {
+        const claimId = `${index + 1}:${p[2]}:${i}`;
+        return { x:p[0], y:p[1], kind:p[2], r:15, got:!!save.rareClaims[claimId], claimId, phase:i*1.3 + .4, ...(p[3] || {}) };
+      }),
+      beacons: (spec.beacons || []).map((b,i) => ({ x:b[0], y:b[1], r:31, active:false, phase:i*.9 })),
+      rainbowRings: (spec.rainbowRings || []).map((r,i) => ({ x:r[0], y:r[1], r:r[2] || 33, reward:r[3] || 30, got:false, phase:i*.9 + .3 })),
+      checkpoints: (spec.checkpoints || buildCheckpoints(spec.width, spec.platforms)).map((c,i) => ({ x:c[0], y:c[1], active:false, phase:i*.8, order:i })),
+      activeCheckpoint: null,
+      obstacles: (spec.obstacles || []).map((o,i) => ({ ...o, id:i, hitCooldown:0 })),
+      storms: spec.storms.map((s,i) => ({ x:s[0], y:s[1], r:s[2], phase:i*.9, vx:rand(-20,20) })),
+      currents: spec.currents.map(c => ({ x:c[0], y:c[1], w:c[2], h:c[3], force:c[4], phase:Math.random()*TAU })),
+      portal: { x:spec.portal[0], y:spec.portal[1], r:54, active:false, phase:0, autoAdvance:0 },
+      objectives: (spec.objectives || []).map(o => ({ ...o, announced:false })),
+      stats: { landed:new Set(), springBounces:0, bursts:0, beacons:0, goldenClouds:0, cloudBonusDrops:0, obstacleHits:0, ringBonusClaimed:false }
+    };
+    player = {
+      x: spec.start[0], y: spec.start[1], vx:0, vy:0, r:18,
+      grounded:false, coyote:0, jumpBuffer:0, burst:1, burstCooldown:0,
+      invuln:0, shield:save.rarePerks.auroraTier >= 3 ? 2 : save.rarePerks.auroraTier >= 1 ? 1 : 0, surge:0, trail:[], facing:1, squash:1, stretch:1
+    };
+    state.levelIndex = index;
+    state.prism = 0;
+    state.levelDropsEarned = 0;
+    state.rareDropsEarned = 0;
+    state.combo = 0;
+    state.comboTimer = 0;
+    state.comboDropsEarned = 0;
+    state.bestComboLevel = 0;
+    state.ringDropsEarned = 0;
+    state.levelTime = 0;
+    state.weatherHue = spec.hue;
+    state.rainIntensity = spec.rainIntensity ?? (.75 + Math.min(index, LEVELS.length - 1) * .08);
+    state.cameraX = 0;
+    state.cameraY = 0;
+    particles = [];
+    rings = [];
+    updateHud();
+  }
+
+  function primaryValue() {
+    if (!level) return 0;
+    if (level.primary.type === 'prisms') return state.prism;
+    if (level.primary.type === 'cloudLandings') return level.stats.landed.size;
+    if (level.primary.type === 'springBounces') return level.stats.springBounces;
+    if (level.primary.type === 'beacons') return level.stats.beacons;
+    return 0;
+  }
+
+  function updateHud() {
+    if (!level) return;
+    ui.levelText.textContent = state.levelIndex + 1;
+    ui.prismText.textContent = primaryValue();
+    ui.prismGoal.textContent = level.primary.target;
+    if (ui.prismLabel) ui.prismLabel.textContent = level.primary.hudLabel;
+    if (ui.dropsText) ui.dropsText.textContent = Math.floor(save.drops).toLocaleString();
+    if (ui.shieldText) ui.shieldText.textContent = player?.shield ? `✦${player.shield}` : '—';
+    if (ui.comboText) ui.comboText.textContent = state.combo > 1 ? `×${state.combo}` : '—';
+    if (ui.ringText) ui.ringText.textContent = level.rainbowRings?.length ? `${level.rainbowRings.filter(r => r.got).length}/${level.rainbowRings.length}` : '—';
+    ui.boostFill.style.transform = `scaleX(${clamp(player?.burst ?? 1, 0, 1)})`;
+  }
+
+  function awakenPortal() {
+    if (!level || level.portal.active || primaryValue() < level.primary.target) return;
+    level.portal.active = true;
+    level.portal.autoAdvance = 0.9;
+    toast('RAINBOW GATE AWAKENED');
+    audio.complete();
+  }
+
+  function checkPrimaryObjective(type) {
+    if (!level || level.primary.type !== type) return;
+    awakenPortal();
+  }
+
+  function objectiveValue(obj) {
+    if (!level) return 0;
+    if (obj.type === 'prisms') return state.prism;
+    if (obj.type === 'cloudLandings') return level.stats.landed.size;
+    if (obj.type === 'springBounces') return level.stats.springBounces;
+    if (obj.type === 'bursts') return level.stats.bursts;
+    if (obj.type === 'beacons') return level.stats.beacons;
+    return 0;
+  }
+
+  function objectiveComplete(obj) {
+    return objectiveValue(obj) >= obj.target;
+  }
+
+  function checkBonusObjectives(type) {
+    if (!level?.objectives?.length) return;
+    for (const obj of level.objectives) {
+      if (obj.type !== type || obj.announced || !objectiveComplete(obj)) continue;
+      obj.announced = true;
+      toast(`BONUS COMPLETE: ${obj.label.toUpperCase()}`);
+    }
+  }
+
+  function bonusSummary() {
+    if (!level?.objectives?.length) return '';
+    const completed = level.objectives.filter(objectiveComplete).length;
+    return `${completed}/${level.objectives.length} BONUS`;
+  }
+
+  function calculateStars() {
+    if (!level?.objectives?.length) return 3;
+    const completed = level.objectives.filter(objectiveComplete).length;
+    if (completed <= 0) return 1;
+    if (completed >= level.objectives.length) return 3;
+    return 2;
+  }
+
+  function starGlyph(count) {
+    return '★'.repeat(count) + '☆'.repeat(Math.max(0, 3 - count));
+  }
+
+  function ownsShopItem(item) {
+    return item.kind === 'aura' ? save.auras.includes(item.key) : save.trails.includes(item.key);
+  }
+
+  function equippedShopItem(item) {
+    return item.kind === 'aura' ? save.equippedAura === item.key : save.equippedTrail === item.key;
+  }
+
+  function buyOrEquipShopItem(item) {
+    const collection = item.kind === 'aura' ? save.auras : save.trails;
+    if (!ownsShopItem(item)) {
+      if (save.drops < item.price) {
+        toast(`NEED ${(item.price - save.drops).toLocaleString()} MORE DROPS`);
+        return;
+      }
+      save.drops -= item.price;
+      collection.push(item.key);
+      audio.collect(4);
+      toast(`${item.name.toUpperCase()} UNLOCKED`);
+    }
+    if (item.kind === 'aura') save.equippedAura = item.key;
+    else save.equippedTrail = item.key;
+    persist();
+    updateShop();
+    if (ui.dropsText) ui.dropsText.textContent = Math.floor(save.drops).toLocaleString();
+  }
+
+  function rarePrismPosition(gem, timeSeconds = state.levelTime) {
+    if (!gem?.amp) return { x:gem.x, y:gem.y };
+    const a = timeSeconds * (gem.speed || .75) + gem.phase;
+    return {
+      x: gem.x + Math.sin(a) * gem.amp,
+      y: gem.y + Math.cos(a * .84) * (gem.yAmp || 8)
+    };
+  }
+
+  function resetPrismChain() {
+    if (!state.combo) return;
+    state.combo = 0;
+    state.comboTimer = 0;
+    updateHud();
+  }
+
+  function registerPrismChain() {
+    state.combo = state.comboTimer > 0 ? state.combo + 1 : 1;
+    state.comboTimer = 2.75;
+    state.bestComboLevel = Math.max(state.bestComboLevel, state.combo);
+    save.bestCombo = Math.max(save.bestCombo || 0, state.combo);
+
+    if (state.combo >= 3 && state.combo % 3 === 0) {
+      const bonus = 10 + Math.floor(state.combo / 3) * 5;
+      save.drops += bonus;
+      state.comboDropsEarned += bonus;
+      player.burst = clamp(player.burst + .16, 0, 1);
+      persist();
+      toast(`PRISM CHAIN ×${state.combo} • +${bonus} DROPS`);
+    }
+    if (state.combo >= 8 && state.combo % 8 === 0) {
+      player.surge = 5.0;
+      player.burst = 1;
+      state.flash = .35;
+      toast(`RAINBOW SURGE • CHAIN ×${state.combo}`);
+    }
+    updateHud();
+  }
+
+  function collectRainbowRing(ring) {
+    if (!ring || ring.got) return;
+    ring.got = true;
+    save.rainbowRings = (save.rainbowRings || 0) + 1;
+    save.drops += ring.reward;
+    state.ringDropsEarned += ring.reward;
+    player.burst = clamp(player.burst + .22, 0, 1);
+    for (let i=0;i<24;i++) addParticle(ring.x,ring.y,{type:'prism',hue:(i/24)*360,life:rand(.35,.72),r:rand(2,5)});
+    rings.push({x:ring.x,y:ring.y,r:ring.r,life:.65,max:.65});
+    audio.tone(620,.16,'triangle',.18,380);
+
+    const complete = level.rainbowRings.length && level.rainbowRings.every(r => r.got);
+    if (complete && !level.stats.ringBonusClaimed) {
+      level.stats.ringBonusClaimed = true;
+      const bonus = 80;
+      save.drops += bonus;
+      state.ringDropsEarned += bonus;
+      player.shield = Math.min(2, (player.shield || 0) + 1);
+      player.burst = 1;
+      toast(`SKY CIRCUIT COMPLETE • +${bonus} DROPS • GUARD +1`);
+    } else {
+      toast(`RAINBOW RING • +${ring.reward} DROPS`);
+    }
+    persist();
+    updateHud();
+  }
+
+  const RARE_MILESTONES = {
+    golden: [
+      { count:3, tier:1, bonus:300, label:'GOLDEN MAGNET', effect:'Rare prisms are easier to collect.' },
+      { count:8, tier:2, bonus:700, label:'TREASURE CLOUDS', effect:'Golden Clouds are worth more Drops.' },
+      { count:15, tier:3, bonus:1500, label:'GOLDEN BLOOM', effect:'+10% level-complete Drops forever.' }
+    ],
+    aurora: [
+      { count:2, tier:1, bonus:500, label:'AURORA GUARD', effect:'Start every level with a Prism Guard.' },
+      { count:5, tier:2, bonus:1000, label:'RAINBOW RESTORE', effect:'Checkpoints restore your Prism Guard.' },
+      { count:10, tier:3, bonus:2000, label:'CELESTIAL GUARD', effect:'Start every level with two Guards.' }
+    ]
+  };
+
+  function applyRareMilestones(kind) {
+    const key = kind === 'aurora' ? 'auroraTier' : 'goldenTier';
+    let tier = save.rarePerks[key] || 0;
+    const unlocked = [];
+    for (const milestone of RARE_MILESTONES[kind]) {
+      if (save.rare[kind] < milestone.count || tier >= milestone.tier) continue;
+      tier = milestone.tier;
+      save.rarePerks[key] = tier;
+      save.drops += milestone.bonus;
+      state.rareDropsEarned += milestone.bonus;
+      unlocked.push(milestone);
+    }
+    return unlocked;
+  }
+
+  function awardRarePrism(gem) {
+    if (!gem || save.rareClaims[gem.claimId]) return { amount:0, milestones:[] };
+    save.rareClaims[gem.claimId] = true;
+    save.rare[gem.kind] = (save.rare[gem.kind] || 0) + 1;
+
+    const aurora = gem.kind === 'aurora';
+    const amount = aurora ? 350 : 120;
+    save.drops += amount;
+    state.rareDropsEarned += amount;
+    player.burst = aurora ? 1 : clamp(player.burst + .45, 0, 1);
+    player.shield = Math.max(player.shield || 0, aurora ? 2 : 1);
+
+    const milestones = applyRareMilestones(gem.kind);
+    persist();
+    updateHud();
+    updateShop();
+    return { amount, milestones };
+  }
+
+  function absorbHit(label = 'OBSTACLE') {
+    if (!player?.shield) return false;
+    player.shield--;
+    player.invuln = Math.max(player.invuln, .65);
+    state.flash = .22;
+    state.screenShake = 3;
+    rings.push({x:player.x,y:player.y,r:14,life:.5,max:.5});
+    for (let i=0;i<18;i++) addParticle(player.x,player.y,{type:'prism',hue:save.rarePerks.auroraTier ? (i/18)*360 : 48,life:rand(.3,.65),r:rand(2,5)});
+    audio.tone(520,.18,'triangle',.26,320);
+    toast(`PRISM GUARD BLOCKED ${label}`);
+    updateHud();
+    return true;
+  }
+
+  function syncExistingRareProgress() {
+    let retroBonus = 0;
+    for (const kind of ['golden','aurora']) {
+      const key = kind === 'aurora' ? 'auroraTier' : 'goldenTier';
+      let tier = save.rarePerks[key] || 0;
+      for (const milestone of RARE_MILESTONES[kind]) {
+        if ((save.rare[kind] || 0) >= milestone.count && tier < milestone.tier) {
+          tier = milestone.tier;
+          save.rarePerks[key] = tier;
+          retroBonus += milestone.bonus;
+        }
+      }
+    }
+    if (retroBonus > 0) {
+      save.drops += retroBonus;
+      persist();
+    }
+  }
+
+  syncExistingRareProgress();
+
+  function toast(text) {
+    ui.toast.textContent = text;
+    ui.toast.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => ui.toast.classList.remove('show'), 1400);
+  }
+
+  function showGameUI(on) {
+    ui.hud.classList.toggle('hidden', !on);
+    ui.boost.classList.toggle('hidden', !on);
+    const coarse = matchMedia('(pointer: coarse)').matches || W < 820;
+    ui.touch.classList.toggle('hidden', !(on && coarse));
+  }
+
+  function hideOverlays() {
+    [ui.menu, ui.pause, ui.level, ui.finish, ui.shop, ui.settings].filter(Boolean).forEach(el => el.classList.remove('visible'));
+  }
+
+  function startGame(index = 0) {
+    audio.init();
+    // Remove focus from overlay/menu buttons before gameplay starts so keyboard
+    // controls cannot accidentally activate an old hidden button later.
+    document.activeElement?.blur?.();
+    state.advancing = false;
+    buildLevel(index);
+    state.scene = 'playing';
+    state.paused = false;
+    hideOverlays();
+    showGameUI(true);
+    state.lastTs = performance.now();
+    toast(level.name.toUpperCase());
+    const startedLevel = state.levelIndex;
+    setTimeout(() => {
+      if (state.scene === 'playing' && state.levelIndex === startedLevel && !state.paused) {
+        const prefix = state.levelIndex >= LEVELS.length
+          ? `${level.special ? `${level.special.name} • ` : ''}${level.region.displayName || level.region.name} • ${level.archetype.name} • `
+          : '';
+        toast(`${prefix}${level.primary.short}`);
+      }
+    }, 850);
+    if (level.objectives.length) {
+      setTimeout(() => {
+        if (state.scene === 'playing' && state.levelIndex === startedLevel && !state.paused) {
+          toast(`BONUS: ${level.objectives.map(o => o.short).join(' • ')}`);
+        }
+      }, 1850);
+    }
+  }
+
+  function togglePause(force) {
+    if (state.scene !== 'playing') return;
+    state.paused = force ?? !state.paused;
+    ui.pause.classList.toggle('visible', state.paused);
+    showGameUI(!state.paused);
+    state.lastTs = performance.now();
+  }
+
+  function finishLevel() {
+    if (state.scene !== 'playing') return;
+    audio.complete();
+    state.scene = 'levelComplete';
+    state.advancing = false;
+    // Snapshot the destination now. The NEXT SKY action no longer depends on
+    // whatever state.levelIndex happens to be after the completion overlay opens.
+    state.nextLevelIndex = state.levelIndex + 1;
+    showGameUI(false);
+    const number = state.levelIndex + 1;
+    const starsEarned = calculateStars();
+    const completedBonus = level.objectives.filter(objectiveComplete).length;
+    const cleanRunBonus = level.obstacles.length && level.stats.obstacleHits === 0 ? 30 : 0;
+    const baseCompletionDrops = 70 + starsEarned * 30 + completedBonus * 20 + (level.stats.cloudBonusDrops || 0) + cleanRunBonus;
+    const completionDrops = save.rarePerks.goldenTier >= 3 ? Math.round(baseCompletionDrops * 1.10) : baseCompletionDrops;
+    state.levelDropsEarned = completionDrops;
+
+    save.unlocked = Math.max(save.unlocked, number + 1);
+    save.totalPrism += state.prism;
+    save.best[number] = Math.min(save.best[number] ?? Infinity, state.levelTime);
+    save.stars[number] = Math.max(save.stars[number] || 0, starsEarned);
+    save.reward = level.reward;
+    save.drops += state.levelDropsEarned;
+    persist();
+
+    if (ui.rewardPrismLabel) ui.rewardPrismLabel.textContent = level.primary.hudLabel;
+    ui.rewardPrism.textContent = `${primaryValue()}/${level.primary.target}`;
+    ui.rewardTime.textContent = formatTime(state.levelTime);
+    const extras = [];
+    if (state.rareDropsEarned > 0) extras.push(`RARE +${state.rareDropsEarned} DROPS`);
+    if (state.comboDropsEarned > 0) extras.push(`CHAIN +${state.comboDropsEarned}`);
+    if (state.ringDropsEarned > 0) extras.push(`RINGS +${state.ringDropsEarned}`);
+    if (state.bestComboLevel >= 3) extras.push(`BEST CHAIN ×${state.bestComboLevel}`);
+    if (cleanRunBonus) extras.push('CLEAN RUN +30');
+    ui.rewardName.textContent = `+${state.levelDropsEarned} DROPS${extras.length ? ` • ${extras.join(' • ')}` : ''}`;
+    ui.levelEyebrow.textContent = `${starGlyph(starsEarned)} • ${Math.floor(save.drops).toLocaleString()} RAINBOW DROPS`;
+    ui.levelTitle.textContent = level.name.toUpperCase();
+    if (ui.dropsText) ui.dropsText.textContent = Math.floor(save.drops).toLocaleString();
+    updateShop();
+    setTimeout(() => {
+      if (state.scene !== 'levelComplete') return;
+      ui.level.classList.add('visible');
+      // Make NEXT SKY the intentional keyboard target instead of whichever
+      // button happened to have focus before the level began.
+      requestAnimationFrame(() => ui.nextBtn?.focus?.({ preventScroll: true }));
+    }, 450);
+  }
+
+  function advanceToNextLevel() {
+    if (state.scene !== 'levelComplete' || state.advancing) return;
+    state.advancing = true;
+    const target = Number.isInteger(state.nextLevelIndex) ? state.nextLevelIndex : state.levelIndex + 1;
+    startGame(Math.max(0, target));
+  }
+
+  function formatTime(sec) {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60).toString().padStart(2,'0');
+    return `${m}:${s}`;
+  }
+
+  function addParticle(x,y,opts={}) {
+    const particleCap = state.reducedMotion ? 180 : 420;
+    if (particles.length >= particleCap) particles.splice(0, Math.max(1, particles.length - particleCap + 1));
+    particles.push({
+      x,y, vx:opts.vx ?? rand(-80,80), vy:opts.vy ?? rand(-100,10),
+      life:opts.life ?? rand(.35,.8), maxLife:opts.life ?? rand(.35,.8),
+      r:opts.r ?? rand(2,5), type:opts.type ?? 'mist', hue:opts.hue ?? state.weatherHue
+    });
+  }
+
+  function burstParticles(x,y) {
+    const burstCount = state.reducedMotion ? 14 : 36;
+    for (let i=0;i<burstCount;i++) {
+      const a = (i/burstCount)*TAU + rand(-.12,.12), sp = rand(100,340);
+      addParticle(x,y,{vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:rand(.35,.75),r:rand(2,6),type:'prism',hue:(i/burstCount)*360});
+    }
+    rings.push({x,y,r:12,life:.55,max:.55});
+  }
+
+  function respawn() {
+    if (!player || player.invuln > 0) return;
+    player.invuln = 1.2;
+    const checkpoint = level.activeCheckpoint;
+    player.x = checkpoint ? checkpoint.x : level.start[0];
+    player.y = checkpoint ? checkpoint.y - 72 : Math.max(100, level.start[1] - 180);
+    player.vx = 0;
+    player.vy = 40;
+    resetPrismChain();
+    player.surge = 0;
+    state.screenShake = 10;
+    audio.hurt();
+    for (let i=0;i<20;i++) addParticle(player.x,player.y,{type:'mist',life:rand(.3,.8)});
+    toast('CAUGHT BY THE STORM');
+  }
+
+  function update(dt) {
+    if (state.scene !== 'playing' || state.paused || !player) return;
+    state.levelTime += dt;
+    state.totalTime += dt;
+    state.flash = Math.max(0, state.flash - dt * 2.8);
+    state.screenShake = Math.max(0, state.screenShake - dt * 18);
+
+    // Drift clouds move predictably and slowly; the first/final safety clouds never drift.
+    for (const platform of level.platforms) updatePlatformMotion(platform, state.levelTime);
+
+    if (player.invuln > 0) player.invuln -= dt;
+    if (player.burstCooldown > 0) player.burstCooldown -= dt;
+    if (player.surge > 0) player.surge = Math.max(0, player.surge - dt);
+    if (state.comboTimer > 0) {
+      state.comboTimer = Math.max(0, state.comboTimer - dt);
+      if (state.comboTimer === 0 && state.combo > 0) resetPrismChain();
+    }
+    player.burst = clamp(player.burst + dt * (player.surge > 0 ? .24 : .12), 0, 1);
+    player.jumpBuffer = Math.max(0, player.jumpBuffer - dt);
+    player.coyote = Math.max(0, player.coyote - dt);
+
+    if (inputPressed('jump')) player.jumpBuffer = .20;
+
+    const left = inputDown('left');
+    const right = inputDown('right');
+    const accel = player.grounded ? 1650 : 1040;
+    const maxSpeed = player.grounded ? 330 : 360;
+    if (left) { player.vx -= accel * dt; player.facing = -1; }
+    if (right) { player.vx += accel * dt; player.facing = 1; }
+    if (!left && !right) player.vx *= Math.pow(player.grounded ? .0006 : .13, dt);
+    player.vx = clamp(player.vx, -maxSpeed, maxSpeed);
+
+    if (player.jumpBuffer > 0 && player.coyote > 0) {
+      player.vy = -650;
+      player.grounded = false;
+      player.coyote = 0;
+      player.jumpBuffer = 0;
+      player.stretch = 1.35;
+      audio.jump();
+      for (let i=0;i<8;i++) addParticle(player.x,player.y+16,{vx:rand(-100,100),vy:rand(20,110),life:.35,type:'mist'});
+    }
+
+    if (!inputDown('jump') && player.vy < -150) player.vy += 700 * dt;
+
+    if (inputPressed('burst') && player.burst >= .55 && player.burstCooldown <= 0) {
+      const dir = left ? -1 : right ? 1 : player.facing;
+      player.vx = dir * 760;
+      player.vy *= .25;
+      player.burst -= .55;
+      player.burstCooldown = .18;
+      level.stats.bursts++;
+      checkBonusObjectives('bursts');
+      player.invuln = Math.max(player.invuln, .25);
+      state.screenShake = 5;
+      state.flash = .45;
+      burstParticles(player.x, player.y);
+      audio.burst();
+    }
+
+    player.vy += 1180 * dt;
+    player.vy = Math.min(player.vy, 920);
+
+    // Wind-current zones remain visually active, but no longer push the player.
+    // Storm movement is now localized to direct contact with a storm cloud.
+    for (const cur of level.currents) {
+      if (player.x > cur.x && player.x < cur.x + cur.w && player.y > cur.y && player.y < cur.y + cur.h) {
+        if (Math.random() < dt * 16) addParticle(rand(cur.x,cur.x+cur.w),rand(cur.y,cur.y+cur.h),{vx:cur.force*.16,vy:rand(-80,-10),life:.55,type:'wind'});
+      }
+    }
+
+    const prevY = player.y;
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+    player.x = clamp(player.x, 16, level.width - 16);
+    player.grounded = false;
+
+    for (const [platformIndex, p] of level.platforms.entries()) {
+      const px = clamp(player.x, p.x, p.x+p.w);
+      const py = clamp(player.y, p.y, p.y+p.h);
+      const dx = player.x-px, dy = player.y-py;
+      if (dx*dx + dy*dy < player.r*player.r) {
+        if (prevY + player.r <= p.y + 10 && player.vy >= 0) {
+          player.y = p.y - player.r;
+          const impact = player.vy;
+          if (!player.grounded && impact > 140) {
+            player.squash = 1.25;
+            audio.land();
+            for (let i=0;i<Math.min(10,impact/60);i++) addParticle(player.x+rand(-18,18),p.y,{vx:rand(-90,90),vy:rand(-80,-10),life:.38,type:'mist'});
+          }
+          player.grounded = true;
+          player.coyote = .18;
+          level.stats.landed.add(platformIndex);
+          checkBonusObjectives('cloudLandings');
+          checkPrimaryObjective('cloudLandings');
+          if (p.type === 'rainbow' && !p.activated) {
+            p.activated = true;
+            player.burst = 1;
+            state.flash = .16;
+            audio.tone(520,.18,'triangle',.24,260);
+            toast('RAINBOW CLOUD RECHARGED');
+          }
+          if (p.type === 'golden' && !p.activated) {
+            p.activated = true;
+            level.stats.goldenClouds++;
+            level.stats.cloudBonusDrops += save.rarePerks.goldenTier >= 2 ? 40 : 20;
+            player.burst = clamp(player.burst + .3, 0, 1);
+            state.flash = .18;
+            audio.tone(610,.2,'triangle',.28,220);
+            toast('GOLDEN CLOUD FOUND');
+          }
+          if (p.type === 'spring' && impact > 120) {
+            level.stats.springBounces++;
+            checkBonusObjectives('springBounces');
+            checkPrimaryObjective('springBounces');
+            player.vy = -820;
+            player.grounded = false;
+            player.coyote = 0;
+            player.stretch = 1.45;
+            state.screenShake = 3;
+            audio.tone(280,.18,'triangle',.3,240);
+          } else {
+            player.vy = 0;
+          }
+        } else if (player.x < p.x) { player.x = p.x - player.r; player.vx = Math.min(0, player.vx); }
+        else if (player.x > p.x+p.w) { player.x = p.x+p.w + player.r; player.vx = Math.max(0, player.vx); }
+      }
+    }
+
+    player.squash = lerp(player.squash, 1, 1-Math.pow(.002,dt));
+    player.stretch = lerp(player.stretch, 1, 1-Math.pow(.002,dt));
+
+    for (const checkpoint of level.checkpoints) {
+      if (checkpoint.active || (level.activeCheckpoint && checkpoint.x <= level.activeCheckpoint.x)) continue;
+      const dx = player.x - checkpoint.x, dy = player.y - checkpoint.y;
+      if (dx*dx + dy*dy < (player.r + 38) ** 2) {
+        level.checkpoints.forEach(c => c.active = false);
+        checkpoint.active = true;
+        level.activeCheckpoint = checkpoint;
+        state.flash = .12;
+        audio.tone(430,.2,'triangle',.22,180);
+        rings.push({x:checkpoint.x,y:checkpoint.y,r:12,life:.55,max:.55});
+        if (save.rarePerks.auroraTier >= 2) {
+          const cap = save.rarePerks.auroraTier >= 3 ? 2 : 1;
+          player.shield = Math.max(player.shield, cap);
+          updateHud();
+        }
+        toast(save.rarePerks.auroraTier >= 2 ? 'CHECKPOINT • GUARD RESTORED' : 'RAINBOW CHECKPOINT');
+      }
+    }
+
+    for (const ring of level.rainbowRings) {
+      if (ring.got) continue;
+      const dx = player.x - ring.x, dy = player.y - ring.y;
+      const collectRadius = player.r + Math.max(12, ring.r - 8);
+      if (dx*dx + dy*dy < collectRadius*collectRadius) collectRainbowRing(ring);
+    }
+
+    for (const gem of level.prisms) {
+      if (gem.got) continue;
+      const dx = player.x-gem.x, dy = player.y-gem.y;
+      const prismMagnet = player.surge > 0 ? 58 : 0;
+      if (dx*dx + dy*dy < (player.r+gem.r+18+prismMagnet)**2) {
+        gem.got = true;
+        state.prism++;
+        registerPrismChain();
+        player.burst = clamp(player.burst + .18,0,1);
+        state.flash = .18;
+        audio.collect(state.prism % 5);
+        for (let i=0;i<16;i++) addParticle(gem.x,gem.y,{type:'prism',hue:(i/16)*360,life:rand(.35,.7)});
+        rings.push({x:gem.x,y:gem.y,r:8,life:.45,max:.45});
+        checkBonusObjectives('prisms');
+        checkPrimaryObjective('prisms');
+        updateHud();
+      }
+    }
+
+    for (const beacon of level.beacons) {
+      if (beacon.active) continue;
+      const dx = player.x - beacon.x, dy = player.y - beacon.y;
+      if (dx*dx + dy*dy < (player.r + beacon.r + 8) ** 2) {
+        beacon.active = true;
+        level.stats.beacons++;
+        state.flash = .16;
+        audio.collect(level.stats.beacons % 5);
+        for (let i=0;i<18;i++) addParticle(beacon.x,beacon.y,{type:'prism',hue:(i/18)*360,life:rand(.35,.72)});
+        rings.push({x:beacon.x,y:beacon.y,r:12,life:.5,max:.5});
+        checkPrimaryObjective('beacons');
+        checkBonusObjectives('beacons');
+        updateHud();
+      }
+    }
+
+    for (const gem of level.rarePrisms) {
+      if (gem.got) continue;
+      const rarePos = rarePrismPosition(gem);
+      const dx = player.x-rarePos.x, dy = player.y-rarePos.y;
+      const magnetBonus = save.rarePerks.goldenTier >= 1 ? 12 : 0;
+      if (dx*dx + dy*dy < (player.r+gem.r+20+magnetBonus)**2) {
+        gem.got = true;
+        state.flash = .28;
+        const aurora = gem.kind === 'aurora';
+        const reward = awardRarePrism(gem);
+        audio.tone(aurora ? 760 : 640, .28, 'triangle', .42, aurora ? 460 : 280);
+        for (let i=0;i<28;i++) addParticle(rarePos.x,rarePos.y,{type:'prism',hue:aurora ? (i/28)*360 : 45,life:rand(.45,.9),r:rand(2,6)});
+        rings.push({x:rarePos.x,y:rarePos.y,r:10,life:.7,max:.7});
+        toast(`${aurora ? 'AURORA' : 'GOLDEN'} PRISM • +${reward.amount} DROPS • GUARD`);
+        if (reward.milestones.length) {
+          const milestone = reward.milestones[reward.milestones.length - 1];
+          setTimeout(() => toast(`${milestone.label} UNLOCKED • +${milestone.bonus} DROPS`), 720);
+        }
+      }
+    }
+
+    for (const obstacle of level.obstacles) {
+      obstacle.hitCooldown = Math.max(0, (obstacle.hitCooldown || 0) - dt);
+
+      if (obstacle.type === 'rainCurtain') {
+        const inside = player.x + player.r > obstacle.x && player.x - player.r < obstacle.x + obstacle.w
+          && player.y + player.r > obstacle.y && player.y - player.r < obstacle.y + obstacle.h;
+        if (inside) {
+          player.vx *= Math.pow(obstacle.slow || .58, dt * 2.4);
+          if (Math.random() < dt * 18) addParticle(rand(obstacle.x, obstacle.x + obstacle.w), rand(obstacle.y, obstacle.y + obstacle.h), {vx:rand(-10,10),vy:rand(80,180),life:.35,type:'wind'});
+        }
+        continue;
+      }
+
+      if (obstacle.type === 'hail') {
+        const pos = obstaclePosition(obstacle, state.levelTime);
+        const dx = player.x - pos.x, dy = player.y - pos.y;
+        const hitRadius = player.r + obstacle.r;
+        if (dx*dx + dy*dy < hitRadius*hitRadius && player.invuln <= 0 && obstacle.hitCooldown <= 0) {
+          obstacle.hitCooldown = .8;
+          level.stats.obstacleHits++;
+          if (!absorbHit('HAIL')) {
+            const distance = Math.hypot(dx,dy) || 1;
+            player.vx = clamp(player.vx + (dx/distance) * 240, -430, 430);
+            player.vy = -260;
+            player.invuln = .72;
+            player.burst = Math.max(0, player.burst - .10);
+            state.screenShake = 5;
+            audio.hurt();
+            toast('HAIL IMPACT');
+          }
+        }
+        continue;
+      }
+
+      if (obstacle.type === 'stormSpark') {
+        const pos = obstaclePosition(obstacle, state.levelTime);
+        const dx = player.x - pos.x, dy = player.y - pos.y;
+        const hitRadius = player.r + obstacle.r;
+        if (dx*dx + dy*dy < hitRadius*hitRadius && player.invuln <= 0 && obstacle.hitCooldown <= 0) {
+          obstacle.hitCooldown = .72;
+          level.stats.obstacleHits++;
+          if (!absorbHit('STORM SPARK')) {
+            const distance = Math.hypot(dx,dy) || 1;
+            player.vx = clamp(player.vx + (dx/distance) * 210, -420, 420);
+            player.vy = Math.min(player.vy, -230);
+            player.invuln = .72;
+            player.burst = Math.max(0, player.burst - .14);
+            state.screenShake = 5;
+            state.flash = .22;
+            audio.tone(150,.15,'square',.10,260);
+            toast('STORM SPARK');
+          }
+        }
+        continue;
+      }
+
+      if (obstacle.type === 'lightning') {
+        const strike = lightningState(obstacle, state.levelTime);
+        if (strike.mode !== 'active' || obstacle.hitCooldown > 0 || player.invuln > 0) continue;
+        const inside = Math.abs(player.x - obstacle.x) < obstacle.w * .5 + player.r
+          && player.y + player.r > obstacle.y && player.y - player.r < obstacle.y + obstacle.h;
+        if (inside) {
+          obstacle.hitCooldown = .9;
+          level.stats.obstacleHits++;
+          if (!absorbHit('LIGHTNING')) {
+            player.vx = clamp(player.vx + (player.x < obstacle.x ? -300 : 300), -450, 450);
+            player.vy = -310;
+            player.invuln = .9;
+            player.burst = Math.max(0, player.burst - .22);
+            state.screenShake = 8;
+            state.flash = .5;
+            audio.tone(95,.22,'square',.16,240);
+            toast('LIGHTNING STRIKE');
+          }
+        }
+      }
+    }
+
+    for (const s of level.storms) {
+      s.phase += dt;
+      const sx = s.x + Math.sin(s.phase*.8)*34;
+      const sy = s.y + Math.cos(s.phase*.65)*20;
+      const dx = player.x-sx, dy = player.y-sy;
+      const contactRadius = s.r * .46 + player.r;
+      if (dx*dx+dy*dy < contactRadius*contactRadius && player.invuln <= 0) {
+        if (!absorbHit('STORM')) {
+          const distance = Math.hypot(dx,dy) || 1;
+          const nx = dx / distance;
+          player.vx = clamp(player.vx + nx * 320, -460, 460);
+          player.vy = Math.min(player.vy, -260);
+          player.invuln = .9;
+          state.screenShake = 7;
+          audio.hurt();
+          toast('CAUGHT BY THE STORM');
+          for (let i=0;i<12;i++) addParticle(player.x,player.y,{type:'mist',life:rand(.25,.65)});
+        }
+      }
+    }
+
+    if (level.portal.active) {
+      level.portal.phase += dt;
+      if (level.portal.autoAdvance > 0) {
+        level.portal.autoAdvance -= dt;
+        if (level.portal.autoAdvance <= 0) finishLevel();
+      }
+    }
+
+    if (player.y > H + 420) respawn();
+
+    player.trail.push({x:player.x,y:player.y,life:.36});
+    if (player.trail.length > 18) player.trail.shift();
+    player.trail.forEach(t => t.life -= dt);
+    player.trail = player.trail.filter(t => t.life > 0);
+
+    particles.forEach(p => { p.life-=dt; p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy += (p.type==='wind' ? -25 : 120)*dt; p.vx*=Math.pow(.18,dt); });
+    particles = particles.filter(p => p.life>0);
+    rings.forEach(r=>{r.life-=dt; r.r+=280*dt;}); rings=rings.filter(r=>r.life>0);
+
+    state.targetCameraX = clamp(player.x - W * .34, 0, Math.max(0, level.width - W));
+    state.targetCameraY = clamp(player.y - H * .52, -80, 150);
+    state.cameraX = lerp(state.cameraX, state.targetCameraX, 1-Math.pow(.00008,dt));
+    state.cameraY = lerp(state.cameraY, state.targetCameraY, 1-Math.pow(.003,dt));
+
+    updateHud();
+    pressed.clear();
+  }
+
+  function worldToScreen(x,y) { return [x-state.cameraX, y-state.cameraY]; }
+
+  function roundedRect(x,y,w,h,r) {
+    const rr=Math.min(r,w/2,h/2); ctx.beginPath(); ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr); ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); ctx.closePath();
+  }
+
+  function drawSky(t) {
+    const hue = state.weatherHue;
+    const grad = ctx.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0, `hsl(${hue+18} 44% 12%)`);
+    grad.addColorStop(.52, `hsl(${hue+4} 42% 20%)`);
+    grad.addColorStop(1, `hsl(${hue-8} 43% 30%)`);
+    ctx.fillStyle = grad; ctx.fillRect(0,0,W,H);
+
+    const mx = state.reducedMotion ? 0 : (state.pointerX/W-.5)*24, my=state.reducedMotion ? 0 : (state.pointerY/H-.5)*12;
+    const glow=ctx.createRadialGradient(W*.72+mx,H*.18+my,0,W*.72,H*.18,Math.max(W,H)*.52);
+    glow.addColorStop(0,'rgba(162,219,255,.18)'); glow.addColorStop(.45,'rgba(135,169,255,.05)'); glow.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=glow; ctx.fillRect(0,0,W,H);
+
+    for (const s of stars) {
+      ctx.globalAlpha=s.a*(.7+.3*Math.sin(t*.001+s.x*20)); ctx.fillStyle='#eaf6ff'; ctx.beginPath(); ctx.arc(s.x*W,s.y*H,s.s,0,TAU); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+
+    for (const c of cloudsBg) {
+      const x=((c.x + t*.001*c.drift)%(W+300))-150 + mx*c.layer;
+      const y=c.y+my*c.layer;
+      drawCloudShape(x,y,140*c.s,54*c.s,c.a,false);
+    }
+  }
+
+  function drawCloudShape(x,y,w,h,a=.2,bright=true) {
+    ctx.save(); ctx.globalAlpha=a;
+    const g=ctx.createLinearGradient(x,y-h,x,y+h);
+    g.addColorStop(0, bright?'#f0f8ff':'#a8c4db'); g.addColorStop(1, bright?'#a8c7dc':'#486179');
+    ctx.fillStyle=g;
+    ctx.beginPath();
+    ctx.ellipse(x,y,w*.29,h*.5,0,0,TAU); ctx.ellipse(x+w*.2,y-h*.18,w*.25,h*.62,0,0,TAU); ctx.ellipse(x-w*.22,y-h*.11,w*.22,h*.52,0,0,TAU); ctx.ellipse(x,y+h*.16,w*.47,h*.42,0,0,TAU); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawRain(dt,t) {
+    ctx.save();
+    ctx.lineCap='round';
+    for (const r of rain) {
+      r.y += r.speed * r.z * dt * state.rainIntensity;
+      r.x -= r.speed * .12 * r.z * dt;
+      if (r.y>H+40 || r.x<-40) { r.y=rand(-120,-10); r.x=rand(0,W+180); }
+      ctx.globalAlpha=.09+.28*r.z;
+      ctx.strokeStyle='#b9e8ff'; ctx.lineWidth=.6+1.2*r.z;
+      ctx.beginPath(); ctx.moveTo(r.x,r.y); ctx.lineTo(r.x-r.len*.18,r.y-r.len); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawRainbowArc(x,y,r,alpha=1) {
+    const colors=['#ff6f91','#ffb45f','#ffe66f','#63e6a9','#65d8ff','#7a9cff','#b687ff'];
+    ctx.save(); ctx.globalAlpha=alpha; ctx.lineCap='round';
+    colors.forEach((c,i)=>{ ctx.strokeStyle=c; ctx.lineWidth=5.5; ctx.beginPath(); ctx.arc(x,y,r-i*5,Math.PI,TAU); ctx.stroke(); });
+    ctx.restore();
+  }
+
+  function drawPlatforms(t) {
+    for (const p of level.platforms) {
+      const [x,y]=worldToScreen(p.x,p.y);
+      if (x>W+200 || x+p.w<-200) continue;
+      p.pulse += .012;
+      ctx.save();
+      const glow = p.type==='spring' ? 'rgba(135,218,255,.25)'
+        : p.type==='rainbow' ? 'rgba(155,224,255,.3)'
+        : p.type==='golden' ? 'rgba(255,220,120,.28)'
+        : p.type==='drift' ? 'rgba(188,222,242,.2)'
+        : 'rgba(168,214,238,.16)';
+      ctx.shadowBlur=22; ctx.shadowColor=glow;
+      drawCloudShape(x+p.w*.5,y+10,p.w*.62,42,p.type==='spring'?.92:.78,true);
+      if (p.type==='spring') {
+        ctx.globalAlpha=.35+.18*Math.sin(t*.004+p.pulse);
+        const g=ctx.createLinearGradient(x,y,x+p.w,y); g.addColorStop(0,'#6ddcff'); g.addColorStop(.5,'#c7f7ff'); g.addColorStop(1,'#917cff');
+        ctx.fillStyle=g; roundedRect(x+28,y-4,p.w-56,4,4); ctx.fill();
+      } else if (p.type==='rainbow') {
+        ctx.globalAlpha=p.activated?.16:.52;
+        const colors=['#ff6f91','#ffb45f','#ffe66f','#63e6a9','#65d8ff','#7a9cff','#b687ff'];
+        const seg=Math.max(8,(p.w-56)/colors.length);
+        colors.forEach((c,i)=>{ctx.fillStyle=c;roundedRect(x+28+i*seg,y-4,seg+1,4,3);ctx.fill();});
+      } else if (p.type==='golden') {
+        ctx.globalAlpha=p.activated?.16:.5;ctx.fillStyle='#ffe47a';ctx.shadowBlur=14;ctx.shadowColor='#ffe47a';roundedRect(x+30,y-4,p.w-60,4,3);ctx.fill();
+      } else if (p.type==='drift') {
+        ctx.globalAlpha=.22+.08*Math.sin(t*.003+p.pulse);ctx.strokeStyle='#dff7ff';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x+34,y-5);ctx.lineTo(x+p.w-34,y-5);ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawCheckpoints(t) {
+    for (const checkpoint of level.checkpoints) {
+      const [x,y]=worldToScreen(checkpoint.x,checkpoint.y);
+      if (x<-120 || x>W+120) continue;
+      ctx.save();
+      const pulse = 1 + Math.sin(t*.004 + checkpoint.phase) * .05;
+      ctx.translate(x,y);ctx.scale(pulse,pulse);
+      ctx.globalAlpha=checkpoint.active?1:.48;
+      drawRainbowArc(0,28,34,checkpoint.active?.95:.48);
+      ctx.fillStyle=checkpoint.active?'rgba(235,253,255,.92)':'rgba(220,245,255,.52)';
+      ctx.shadowBlur=checkpoint.active?22:8;ctx.shadowColor='rgba(120,225,255,.72)';
+      ctx.beginPath();ctx.arc(0,4,6,0,TAU);ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawCurrents(t) {
+    for (const c of level.currents) {
+      const [x,y]=worldToScreen(c.x,c.y);
+      if (x>W+200||x+c.w<-200) continue;
+      ctx.save();
+      ctx.globalAlpha=.12;
+      const g=ctx.createLinearGradient(x,y,x+c.w,y); g.addColorStop(0,'rgba(120,220,255,0)'); g.addColorStop(.5,'rgba(180,240,255,.7)'); g.addColorStop(1,'rgba(120,220,255,0)');
+      ctx.fillStyle=g; roundedRect(x,y,c.w,c.h,35); ctx.fill();
+      ctx.globalAlpha=.35;
+      ctx.strokeStyle='#d7f7ff'; ctx.lineWidth=1;
+      for(let i=0;i<5;i++){
+        const yy=y+((i*73+t*.07)%c.h); ctx.beginPath();
+        const dir=Math.sign(c.force); const sx=dir>0?x+12:x+c.w-12; ctx.moveTo(sx,yy); ctx.quadraticCurveTo(x+c.w*.5,yy-18,x+c.w-(sx-x),yy-4); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawRainbowRings(t) {
+    const colors=['#ff7b9c','#ffb05f','#ffe56f','#6ee7a5','#65ddff','#8298ff','#c48dff'];
+    for (const ring of level.rainbowRings) {
+      if (ring.got) continue;
+      const [x,y0]=worldToScreen(ring.x,ring.y);
+      const y=y0+Math.sin(t*.004+ring.phase)*5;
+      if (x < -90 || x > W + 90) continue;
+      ctx.save();ctx.translate(x,y);
+      const pulse=1+Math.sin(t*.006+ring.phase)*.045;
+      ctx.rotate(Math.sin(t*.0018+ring.phase)*.08);
+      ctx.globalAlpha=.9;ctx.lineCap='round';
+      colors.forEach((c,i)=>{
+        ctx.strokeStyle=c;ctx.lineWidth=2.2;ctx.shadowBlur=10;ctx.shadowColor=c;
+        ctx.beginPath();ctx.arc(0,0,(ring.r-7+i*2.1)*pulse,0,TAU);ctx.stroke();
+      });
+      ctx.globalAlpha=.18;ctx.fillStyle='#eefdff';ctx.beginPath();ctx.arc(0,0,ring.r-11,0,TAU);ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawObstacles(t) {
+    for (const obstacle of level.obstacles) {
+      if (obstacle.type === 'rainCurtain') {
+        const [x,y] = worldToScreen(obstacle.x, obstacle.y);
+        if (x > W + 120 || x + obstacle.w < -120) continue;
+        ctx.save();
+        const g = ctx.createLinearGradient(x,y,x+obstacle.w,y);
+        g.addColorStop(0,'rgba(120,218,255,0)');
+        g.addColorStop(.5,'rgba(174,232,255,.18)');
+        g.addColorStop(1,'rgba(120,218,255,0)');
+        ctx.fillStyle=g;ctx.fillRect(x,y,obstacle.w,obstacle.h);
+        ctx.strokeStyle='rgba(205,243,255,.43)';ctx.lineWidth=1.2;
+        for (let i=0;i<9;i++) {
+          const xx=x+8+(i/8)*(obstacle.w-16);
+          const yy=y+((t*.22+i*47+obstacle.phase*40)%Math.max(40,obstacle.h));
+          ctx.beginPath();ctx.moveTo(xx,yy-24);ctx.lineTo(xx-4,yy+18);ctx.stroke();
+        }
+        ctx.restore();
+        continue;
+      }
+
+      if (obstacle.type === 'hail') {
+        const pos=obstaclePosition(obstacle,state.levelTime);
+        const [x,y]=worldToScreen(pos.x,pos.y);
+        if (x<-80||x>W+80) continue;
+        ctx.save();ctx.translate(x,y);ctx.rotate(t*.0012+obstacle.phase);
+        ctx.shadowBlur=20;ctx.shadowColor='rgba(176,235,255,.8)';
+        const g=ctx.createRadialGradient(-7,-8,2,0,0,obstacle.r);
+        g.addColorStop(0,'#ffffff');g.addColorStop(.35,'#d8f5ff');g.addColorStop(1,'#78b6d5');
+        ctx.fillStyle=g;ctx.beginPath();ctx.arc(0,0,obstacle.r,0,TAU);ctx.fill();
+        ctx.globalAlpha=.48;ctx.strokeStyle='#effcff';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(-12,-4);ctx.lineTo(9,8);ctx.moveTo(-3,-15);ctx.lineTo(3,13);ctx.stroke();
+        ctx.restore();
+        continue;
+      }
+
+      if (obstacle.type === 'stormSpark') {
+        const pos=obstaclePosition(obstacle,state.levelTime);
+        const [x,y]=worldToScreen(pos.x,pos.y);
+        if (x<-70||x>W+70) continue;
+        ctx.save();ctx.translate(x,y);ctx.rotate(t*.0024+obstacle.phase);
+        ctx.shadowBlur=24;ctx.shadowColor='rgba(155,130,255,.9)';
+        const g=ctx.createRadialGradient(-4,-5,1,0,0,obstacle.r);
+        g.addColorStop(0,'#ffffff');g.addColorStop(.32,'#bff5ff');g.addColorStop(.66,'#a889ff');g.addColorStop(1,'rgba(76,54,145,.15)');
+        ctx.fillStyle=g;ctx.beginPath();ctx.arc(0,0,obstacle.r,0,TAU);ctx.fill();
+        ctx.strokeStyle='rgba(230,246,255,.85)';ctx.lineWidth=1.6;
+        for(let i=0;i<3;i++){ctx.beginPath();ctx.arc(0,0,obstacle.r+6+i*4,(t*.002+i*1.7)%TAU,(t*.002+i*1.7)%TAU+1.1);ctx.stroke();}
+        ctx.restore();
+        continue;
+      }
+
+      if (obstacle.type === 'lightning') {
+        const strike=lightningState(obstacle,state.levelTime);
+        const [x,y]=worldToScreen(obstacle.x,obstacle.y);
+        if (x<-90||x>W+90) continue;
+        ctx.save();
+        const warning = strike.mode === 'warning';
+        const active = strike.mode === 'active';
+        ctx.globalAlpha=active ? .98 : warning ? .28 + strike.strength*.4 : .10;
+        ctx.strokeStyle=active?'#f4fbff':'#b8e9ff';
+        ctx.shadowBlur=active?30:warning?14:4;ctx.shadowColor=active?'#b993ff':'#83dcff';
+        ctx.lineWidth=active?4:1.4;
+        ctx.beginPath();ctx.moveTo(x,y);
+        const segments=active?9:5;
+        for(let i=1;i<=segments;i++){
+          const yy=y+(obstacle.h/segments)*i;
+          const jitter=active?Math.sin(i*13.7+t*.03)*12:Math.sin(i*4.2+obstacle.phase)*3;
+          ctx.lineTo(x+jitter,yy);
+        }
+        ctx.stroke();
+        ctx.globalAlpha=active?.55:warning?.20:.06;
+        ctx.fillStyle=active?'#e7ddff':'#d6f5ff';ctx.fillRect(x-obstacle.w*.5,y,obstacle.w,obstacle.h);
+        ctx.restore();
+      }
+    }
+  }
+
+  function drawStorms(t) {
+    for (const s of level.storms) {
+      const sx=s.x+Math.sin(s.phase*.8)*34, sy=s.y+Math.cos(s.phase*.65)*20;
+      const [x,y]=worldToScreen(sx,sy);
+      if (x<-180||x>W+180) continue;
+      const pulse=1+Math.sin(t*.006+s.phase)*.05;
+      ctx.save();
+      const rg=ctx.createRadialGradient(x,y,0,x,y,s.r*pulse); rg.addColorStop(0,'rgba(26,20,56,.86)'); rg.addColorStop(.5,'rgba(44,45,93,.38)'); rg.addColorStop(1,'rgba(42,53,91,0)');
+      ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(x,y,s.r*pulse,0,TAU);ctx.fill();
+      ctx.globalAlpha=.5; drawCloudShape(x,y,s.r*.9,s.r*.35,.6,false);
+      ctx.strokeStyle='rgba(180,197,255,.6)';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(x+3,y+5);ctx.lineTo(x-8,y+27);ctx.lineTo(x+5,y+24);ctx.lineTo(x-3,y+45);ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawPrisms(t) {
+    for (const gem of level.prisms) {
+      if (gem.got) continue;
+      const [x,y0]=worldToScreen(gem.x,gem.y); const y=y0+Math.sin(t*.004+gem.phase)*7;
+      if(x<-80||x>W+80)continue;
+      ctx.save(); ctx.translate(x,y); ctx.rotate(t*.0015+gem.phase); ctx.shadowBlur=24; ctx.shadowColor='rgba(143,232,255,.75)';
+      const g=ctx.createLinearGradient(-12,-16,15,15); g.addColorStop(0,'#ffffff'); g.addColorStop(.28,'#79e6ff'); g.addColorStop(.58,'#a78bfa'); g.addColorStop(.82,'#ff89b5'); g.addColorStop(1,'#ffe07d');
+      ctx.fillStyle=g; ctx.beginPath(); ctx.moveTo(0,-16);ctx.lineTo(12,0);ctx.lineTo(0,16);ctx.lineTo(-12,0);ctx.closePath();ctx.fill();
+      ctx.globalAlpha=.55;ctx.fillStyle='#fff';ctx.beginPath();ctx.moveTo(-1,-12);ctx.lineTo(8,0);ctx.lineTo(1,4);ctx.closePath();ctx.fill();ctx.restore();
+    }
+  }
+
+  function drawRarePrisms(t) {
+    for (const gem of level.rarePrisms) {
+      if (gem.got) continue;
+      const rarePos=rarePrismPosition(gem);
+      const [x,y0]=worldToScreen(rarePos.x,rarePos.y); const y=y0+Math.sin(t*.0045+gem.phase)*8;
+      if(x<-90||x>W+90)continue;
+      const aurora = gem.kind === 'aurora';
+      ctx.save(); ctx.translate(x,y); ctx.rotate(t*.002+gem.phase);
+      ctx.shadowBlur=aurora?38:30; ctx.shadowColor=aurora?'rgba(170,130,255,.95)':'rgba(255,218,95,.95)';
+      const g=ctx.createLinearGradient(-15,-18,16,18);
+      if (aurora) {
+        g.addColorStop(0,'#ffffff'); g.addColorStop(.22,'#7df9ff'); g.addColorStop(.48,'#8d7dff'); g.addColorStop(.72,'#ff8fd4'); g.addColorStop(1,'#9dffb0');
+      } else {
+        g.addColorStop(0,'#fffbe0'); g.addColorStop(.3,'#ffe46c'); g.addColorStop(.68,'#ffb52f'); g.addColorStop(1,'#fff3a8');
+      }
+      ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(0,-19);ctx.lineTo(14,0);ctx.lineTo(0,19);ctx.lineTo(-14,0);ctx.closePath();ctx.fill();
+      ctx.globalAlpha=.8;ctx.strokeStyle='#fff';ctx.lineWidth=1.4;ctx.beginPath();ctx.arc(0,0,24+Math.sin(t*.006+gem.phase)*3,0,TAU);ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawBeacons(t) {
+    const colors=['#ff6f91','#ffb45f','#ffe66f','#63e6a9','#65d8ff','#7a9cff','#b687ff'];
+    for (const beacon of level.beacons) {
+      const [x,y]=worldToScreen(beacon.x,beacon.y);
+      if(x<-100||x>W+100)continue;
+      ctx.save();ctx.translate(x,y);ctx.rotate(t*.00055+beacon.phase);
+      ctx.globalAlpha=beacon.active?.22:.86;
+      ctx.lineWidth=4;ctx.lineCap='round';
+      colors.forEach((c,i)=>{ctx.strokeStyle=c;ctx.beginPath();ctx.arc(0,0,beacon.r,(i/colors.length)*TAU+.08,(i/colors.length)*TAU+.7);ctx.stroke();});
+      ctx.globalAlpha=beacon.active?.14:.28;ctx.fillStyle='#eafaff';ctx.beginPath();ctx.arc(0,0,12+Math.sin(t*.005+beacon.phase)*2,0,TAU);ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawPortal(t) {
+    const p=level.portal; const [x,y]=worldToScreen(p.x,p.y);
+    if(x<-180||x>W+180)return;
+    ctx.save();
+    ctx.globalAlpha=p.active?1:.18;
+    drawRainbowArc(x,y+34,p.r, .88);
+    const glow=ctx.createRadialGradient(x,y+10,0,x,y+10,90); glow.addColorStop(0,p.active?'rgba(210,248,255,.28)':'rgba(150,170,190,.08)');glow.addColorStop(1,'rgba(0,0,0,0)');ctx.fillStyle=glow;ctx.beginPath();ctx.arc(x,y,90,0,TAU);ctx.fill();
+    if (!p.active) { ctx.globalAlpha=.45;ctx.fillStyle='#d8e5ef';ctx.font='700 9px Inter, sans-serif';ctx.textAlign='center';ctx.fillText(`${primaryValue()}/${level.primary.target} ${level.primary.hudLabel}`,x,y+58); }
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    for(const p of particles){
+      const [x,y]=worldToScreen(p.x,p.y); const a=clamp(p.life/p.maxLife,0,1);
+      ctx.save();ctx.globalAlpha=a;
+      if(p.type==='prism'){ctx.fillStyle=`hsl(${p.hue} 95% 72%)`;ctx.shadowBlur=12;ctx.shadowColor=ctx.fillStyle;}
+      else if(p.type==='wind'){ctx.fillStyle='rgba(215,248,255,.7)';}
+      else ctx.fillStyle='rgba(220,244,255,.48)';
+      ctx.beginPath();ctx.arc(x,y,p.r*(.6+a*.6),0,TAU);ctx.fill();ctx.restore();
+    }
+    for(const r of rings){const [x,y]=worldToScreen(r.x,r.y);ctx.save();ctx.globalAlpha=r.life/r.max;ctx.strokeStyle='#dff8ff';ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,r.r,0,TAU);ctx.stroke();ctx.restore();}
+  }
+
+  function drawPlayer(t) {
+    if(!player)return;
+    const [x,y]=worldToScreen(player.x,player.y);
+    ctx.save();
+    if(player.invuln>0 && Math.floor(player.invuln*14)%2===0)ctx.globalAlpha=.35;
+    player.trail.forEach((tr,i)=>{
+      const [tx,ty]=worldToScreen(tr.x,tr.y);
+      const a=tr.life/.36;
+      ctx.globalAlpha=.12*a;
+      if (save.equippedTrail === 'golden') ctx.fillStyle='#ffe36e';
+      else if (save.equippedTrail === 'aurora') ctx.fillStyle=`hsl(${(t*.035+i*11)%360} 86% 74%)`;
+      else if (save.equippedTrail === 'prismatic') ctx.fillStyle=`hsl(${(t*.075+i*19)%360} 96% 73%)`;
+      else if (save.equippedTrail === 'rainbow') ctx.fillStyle=`hsl(${(i*24+t*.045)%360} 94% 72%)`;
+      else ctx.fillStyle=`hsl(${180+i*8} 90% 72%)`;
+      ctx.beginPath();ctx.arc(tx,ty,player.r*(.3+i/player.trail.length*.35),0,TAU);ctx.fill();
+    });
+    ctx.globalAlpha=1;
+    ctx.translate(x,y);ctx.scale(1/player.squash*player.stretch,player.squash/player.stretch);
+    if (save.equippedAura && save.equippedAura !== 'mist') {
+      const pulse = 30 + Math.sin(t*.004)*3;
+      const auraColor = save.equippedAura === 'golden' ? '#ffe36e' : save.equippedAura === 'aurora' ? `hsl(${(t*.04)%360} 90% 72%)` : save.equippedAura === 'prismatic' ? `hsl(${(t*.08)%360} 95% 75%)` : '#8feaff';
+      if (player.surge > 0) { ctx.globalAlpha=.34+.12*Math.sin(t*.012);ctx.strokeStyle=`hsl(${(t*.11)%360} 96% 76%)`;ctx.lineWidth=3;ctx.shadowBlur=24;ctx.shadowColor=ctx.strokeStyle;ctx.beginPath();ctx.arc(0,0,31+Math.sin(t*.009)*3,0,TAU);ctx.stroke();ctx.globalAlpha=1; }
+      ctx.save();ctx.globalAlpha=.18;ctx.strokeStyle=auraColor;ctx.lineWidth=4;ctx.shadowBlur=18;ctx.shadowColor=auraColor;ctx.beginPath();ctx.arc(0,0,pulse,0,TAU);ctx.stroke();ctx.restore();
+    }
+    if (player.shield > 0) {
+      ctx.save();
+      ctx.globalAlpha=.28+.10*Math.sin(t*.006);
+      ctx.strokeStyle=player.shield>1?'#c7a7ff':'#ffe37a';
+      ctx.lineWidth=2.2;ctx.shadowBlur=18;ctx.shadowColor=ctx.strokeStyle;
+      ctx.beginPath();ctx.arc(0,0,29+Math.sin(t*.005)*2,0,TAU);ctx.stroke();
+      if (player.shield>1) {ctx.globalAlpha=.18;ctx.beginPath();ctx.arc(0,0,35,0,TAU);ctx.stroke();}
+      ctx.restore();
+    }
+    const g=ctx.createRadialGradient(-6,-8,2,0,0,24); g.addColorStop(0,'#f5fdff');g.addColorStop(.28,'#bcecff');g.addColorStop(.76,'#6cc8f0');g.addColorStop(1,'#508bc2');
+    ctx.fillStyle=g;ctx.shadowBlur=24;ctx.shadowColor='rgba(100,211,255,.55)';
+    ctx.beginPath();ctx.moveTo(0,-22);ctx.bezierCurveTo(18,-5,23,8,12,19);ctx.bezierCurveTo(5,26,-8,24,-15,17);ctx.bezierCurveTo(-25,6,-15,-8,0,-22);ctx.fill();
+    ctx.shadowBlur=0;ctx.globalAlpha=.75;ctx.fillStyle='#fff';ctx.beginPath();ctx.ellipse(-6,-7,4,7,-.45,0,TAU);ctx.fill();
+    ctx.globalAlpha=.9;ctx.fillStyle='#1d4970';ctx.beginPath();ctx.arc(5,2,2,0,TAU);ctx.arc(-5,2,2,0,TAU);ctx.fill();
+    ctx.restore();
+  }
+
+  function drawForegroundMist(t) {
+    ctx.save();
+    const grad=ctx.createLinearGradient(0,H*.62,0,H);grad.addColorStop(0,'rgba(216,241,255,0)');grad.addColorStop(1,'rgba(195,226,241,.13)');ctx.fillStyle=grad;ctx.fillRect(0,H*.58,W,H*.42);
+    ctx.globalAlpha=.08; for(let i=0;i<5;i++){const x=((i*310+t*.012)%(W+500))-250;drawCloudShape(x,H-30+Math.sin(t*.001+i)*15,220,65,.16,true);}ctx.restore();
+  }
+
+  function draw(t,dt) {
+    ctx.save();
+    const shakeX=state.screenShake && !state.reducedMotion?rand(-state.screenShake,state.screenShake):0;
+    const shakeY=state.screenShake && !state.reducedMotion?rand(-state.screenShake,state.screenShake):0;
+    ctx.translate(shakeX,shakeY);
+    drawSky(t);
+    drawRain(dt,t);
+    if(level){drawCurrents(t);drawPortal(t);drawPlatforms(t);drawCheckpoints(t);drawRainbowRings(t);drawObstacles(t);drawStorms(t);drawBeacons(t);drawPrisms(t);drawRarePrisms(t);drawParticles();drawPlayer(t);}
+    drawForegroundMist(t);
+    if(state.flash>0){ctx.globalAlpha=state.flash*.28;ctx.fillStyle='#dff8ff';ctx.fillRect(-20,-20,W+40,H+40);ctx.globalAlpha=1;}
+    ctx.restore();
+  }
+
+  function loop(ts) {
+    let dt=(ts-state.lastTs)/1000; state.lastTs=ts; dt=Math.min(dt,.033);
+    if(state.scene!=='playing' || !state.paused) update(dt);
+    draw(ts,dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  const menuShopBtn = document.createElement('button');
+  menuShopBtn.className = 'secondary';
+  menuShopBtn.innerHTML = 'RAINBOW SHOP • <span data-shop-balance>0</span> DROPS';
+  ui.continueBtn.insertAdjacentElement('afterend', menuShopBtn);
+  menuShopBtn.addEventListener('click', () => openShop(ui.menu));
+
+  const levelShopBtn = document.createElement('button');
+  levelShopBtn.className = 'secondary';
+  levelShopBtn.innerHTML = 'SPEND DROPS • <span data-shop-balance>0</span>';
+  document.getElementById('replayBtn').insertAdjacentElement('beforebegin', levelShopBtn);
+  levelShopBtn.addEventListener('click', () => openShop(ui.level));
+
+  shopOverlay.querySelector('#shopCloseBtn').addEventListener('click', closeShop);
+  updateShop();
+
+  document.getElementById('playBtn').addEventListener('click',()=>startGame(0));
+  ui.continueBtn.addEventListener('click',()=>startGame(Math.max(0,save.unlocked-1)));
+  ui.pauseBtn.addEventListener('click',()=>togglePause(true));
+  document.getElementById('resumeBtn').addEventListener('click',()=>togglePause(false));
+  document.getElementById('restartBtn').addEventListener('click',()=>startGame(state.levelIndex));
+  document.getElementById('menuBtn').addEventListener('click',()=>{state.scene='menu';state.paused=false;hideOverlays();ui.menu.classList.add('visible');showGameUI(false);updateShop();});
+  document.getElementById('replayBtn').addEventListener('click',()=>startGame(state.levelIndex));
+  // Use the same progression function for mouse, trackpad, touch and keyboard.
+  // pointerup makes the primary action feel reliable on trackpads; the click
+  // listener remains as an accessibility/browser fallback. The scene/guard
+  // prevents the two events from advancing twice.
+  const nextSky = e => {
+    e?.preventDefault?.();
+    e?.stopPropagation?.();
+    advanceToNextLevel();
+  };
+  ui.nextBtn.style.touchAction = 'manipulation';
+  ui.nextBtn.style.pointerEvents = 'auto';
+  ui.nextBtn.addEventListener('pointerup', nextSky);
+  ui.nextBtn.addEventListener('click', nextSky);
+  document.getElementById('againBtn').addEventListener('click',()=>startGame(0));
+  document.getElementById('finishMenuBtn').addEventListener('click',()=>{state.scene='menu';hideOverlays();ui.menu.classList.add('visible');showGameUI(false);updateShop();});
+  ui.settingsBtn?.addEventListener('click', () => openSettings(ui.menu));
+  ui.pauseSettingsBtn?.addEventListener('click', () => openSettings(ui.pause));
+  ui.settingsCloseBtn?.addEventListener('click', closeSettings);
+  ui.settingsMuteBtn?.addEventListener('click', () => setMuted(!state.muted));
+  ui.motionBtn?.addEventListener('click', () => setReducedMotion(!state.reducedMotion));
+  ui.exportSaveBtn?.addEventListener('click', downloadSaveBackup);
+  ui.importSaveBtn?.addEventListener('click', () => ui.saveImportInput?.click());
+  ui.saveImportInput?.addEventListener('change', event => importSaveBackup(event.target.files?.[0]));
+  ui.resetSaveBtn?.addEventListener('click', resetLocalProgress);
+  ui.muteBtn.addEventListener('click',()=>setMuted(!state.muted));
+  updateSettingsUi();
+
+  if (save.unlocked > 1) ui.continueBtn.classList.remove('hidden');
+})();
