@@ -1,0 +1,19 @@
+{
+  "name": "prismfall-rainbow-game",
+  "version": "2.3.0",
+  "private": true,
+  "description": "Prismfall \u2014 a public-release infinite physics platformer with rain, clouds, rainbows, rare prism rewards, obstacles, circuits, progression and local save portability.",
+  "type": "module",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "dev": "node server.mjs --dev",
+    "build": "node scripts/build.mjs",
+    "start": "node server.mjs",
+    "verify": "node scripts/verify.mjs",
+    "vercel-build": "npm run build",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "npm run build && npm run verify && npm run smoke"
+  }
+}
