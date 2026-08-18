@@ -1,7 +1,8 @@
 export const OBSTACLE_TYPES = {
   lightning: { label: 'Lightning Column' },
   hail: { label: 'Hail Orb' },
-  rainCurtain: { label: 'Rain Curtain' }
+  rainCurtain: { label: 'Rain Curtain' },
+  stormSpark: { label: 'Storm Spark' }
 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -10,7 +11,7 @@ function chooseType(levelNumber, slot, special) {
   if (special?.key === 'auroraNight' && slot === 0) return 'lightning';
   if (special?.key === 'prismRain' && slot === 0) return 'rainCurtain';
   if (special?.key === 'goldenShower' && slot === 0) return 'hail';
-  return ['rainCurtain', 'hail', 'lightning'][(levelNumber + slot) % 3];
+  return ['rainCurtain', 'hail', 'lightning', 'stormSpark'][(levelNumber + slot) % 4];
 }
 
 export function generateObstacles({ levelNumber, platforms, rng, special }) {
@@ -62,6 +63,16 @@ export function generateObstacles({ levelNumber, platforms, rng, special }) {
         speed: .72 + rng() * .28,
         phase: rng() * Math.PI * 2
       });
+    } else if (type === 'stormSpark') {
+      obstacles.push({
+        type,
+        x: Math.round(centerX),
+        y: Math.round(clamp(cloudY - 110 - rng() * 24, 250, 420)),
+        r: 16 + Math.round(rng() * 3),
+        orbit: 24 + Math.round(rng() * 14),
+        speed: .9 + rng() * .35,
+        phase: rng() * Math.PI * 2
+      });
     } else {
       const top = 168 + Math.round(rng() * 24);
       obstacles.push({
@@ -80,11 +91,20 @@ export function generateObstacles({ levelNumber, platforms, rng, special }) {
 }
 
 export function obstaclePosition(obstacle, timeSeconds) {
-  if (obstacle.type !== 'hail') return { x: obstacle.x, y: obstacle.y };
-  return {
-    x: obstacle.x + Math.sin(timeSeconds * obstacle.speed + obstacle.phase) * obstacle.amp,
-    y: obstacle.y + Math.cos(timeSeconds * obstacle.speed * .72 + obstacle.phase) * 14
-  };
+  if (obstacle.type === 'hail') {
+    return {
+      x: obstacle.x + Math.sin(timeSeconds * obstacle.speed + obstacle.phase) * obstacle.amp,
+      y: obstacle.y + Math.cos(timeSeconds * obstacle.speed * .72 + obstacle.phase) * 14
+    };
+  }
+  if (obstacle.type === 'stormSpark') {
+    const a = timeSeconds * obstacle.speed + obstacle.phase;
+    return {
+      x: obstacle.x + Math.cos(a) * obstacle.orbit,
+      y: obstacle.y + Math.sin(a * .92) * obstacle.orbit * .62
+    };
+  }
+  return { x: obstacle.x, y: obstacle.y };
 }
 
 export function lightningState(obstacle, timeSeconds) {
